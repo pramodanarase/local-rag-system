@@ -24,7 +24,7 @@ public class Config {
     );
 
     // Embedding model settings
-    public static final String EMBEDDING_MODEL = "hf-internal-testing/tiny-random-bert";
+    public static final String EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2";
 
     // Index settings
     public static final Path INDEX_PATH = Path.of("data", "index");
