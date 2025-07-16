@@ -50,3 +50,9 @@ Thumbs.db
 
 # Project specific
 data/index/ 
+models/
+*.bin
+*.onnx
+*.h5
+*.safetensors
+*.ot 

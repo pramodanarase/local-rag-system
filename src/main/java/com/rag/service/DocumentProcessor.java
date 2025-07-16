@@ -1,103 +1,164 @@
 package com.rag.service;
 
+import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import com.rag.config.Config;
 import com.rag.model.Document;
 import com.rag.model.TextChunk;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
+import java.io.Closeable;
 import java.io.IOException;
-import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.Map;
 
-public class DocumentProcessor {
+public class DocumentProcessor implements Closeable {
     private static final Logger logger = LoggerFactory.getLogger(DocumentProcessor.class);
-    private final EmbeddingService embeddingService;
+    private static final int MAX_FILE_SIZE = 100 * 1024; // 100KB
+    private static final int MAX_BUFFER_SIZE = 4 * 1024; // 4KB
+    private static final int MAX_TOKENS = 512; // Maximum tokens per chunk for all-MiniLM-L6-v2
 
-    public DocumentProcessor(EmbeddingService embeddingService) {
-        this.embeddingService = embeddingService;
+    private final HuggingFaceTokenizer tokenizer;
+
+    public DocumentProcessor() throws IOException {
+        // Initialize the tokenizer with options
+        Map<String, String> options = Map.of(
+                "truncation", "true",
+                "maxLength", String.valueOf(MAX_TOKENS));
+
+        this.tokenizer = HuggingFaceTokenizer.newInstance(
+                Paths.get(Config.LOCAL_MODEL_PATH),
+                options
+        );
+        logger.info("Initialized HuggingFace tokenizer from {}", Config.LOCAL_MODEL_PATH);
     }
 
-    public List<Document> processRepository(String repoPath) throws IOException {
-        Path path = Paths.get(repoPath);
-        List<Document> documents = new ArrayList<>();
+    /**
+     * Process a file into a Document with overlapping text chunks.
+     *
+     * @param file The file to process
+     * @return A Document containing the processed text chunks
+     * @throws IOException if reading the file fails
+     */
+    public Document processFile(Path file) throws IOException {
+        // Check file size first
+        long fileSize = Files.size(file);
+        if (fileSize > MAX_FILE_SIZE) {
+            logger.warn("Skipping large file ({}KB): {}", fileSize / 1024, file);
+            return new Document(file, List.of());
+        }
 
-        Files.walkFileTree(path, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                if (shouldProcessFile(file)) {
-                    try {
-                        Document doc = processFile(file);
-                        documents.add(doc);
-                        logger.debug("Processed file: {}", file);
-                    } catch (Exception e) {
-                        logger.error("Error processing file: {}", file, e);
+        List<TextChunk> chunks = new ArrayList<>();
+        StringBuilder buffer = new StringBuilder(MAX_BUFFER_SIZE);
+        int position = 0;
+
+        // Process file line by line to avoid loading entire file into memory
+        try (BufferedReader reader = Files.newBufferedReader(file)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // Skip empty lines and very long lines
+                if (line.trim().isEmpty() || line.length() > MAX_BUFFER_SIZE) {
+                    continue;
+                }
+
+                buffer.append(line).append('\n');
+                
+                // Process buffer when it exceeds chunk size
+                if (buffer.length() >= Config.CHUNK_SIZE) {
+                    chunks.addAll(createChunks(buffer.toString(), position));
+                    position += buffer.length() - Config.CHUNK_OVERLAP;
+                    
+                    // Keep overlap portion for next chunk
+                    if (buffer.length() > Config.CHUNK_OVERLAP) {
+                        buffer.delete(0, buffer.length() - Config.CHUNK_OVERLAP);
+                    } else {
+                        buffer.setLength(0);
                     }
                 }
-                return FileVisitResult.CONTINUE;
+
+                // Clear buffer if it gets too large
+                if (buffer.length() > MAX_BUFFER_SIZE) {
+                    buffer.setLength(0);
+                }
             }
-
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                return shouldExcludeDirectory(dir) ? 
-                    FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+            
+            // Process remaining text
+            if (buffer.length() > 0) {
+                chunks.addAll(createChunks(buffer.toString(), position));
             }
-        });
+        }
 
-        return documents;
+        return new Document(file, chunks);
     }
-
-    private boolean shouldProcessFile(Path file) {
-        String extension = getFileExtension(file);
-        return Config.INCLUDE_EXTENSIONS.contains(extension);
-    }
-
-    private boolean shouldExcludeDirectory(Path dir) {
-        return Config.EXCLUDE_DIRS.contains(dir.getFileName().toString());
-    }
-
-    private String getFileExtension(Path file) {
-        String name = file.getFileName().toString();
-        int lastDotIndex = name.lastIndexOf('.');
-        return lastDotIndex > 0 ? name.substring(lastDotIndex) : "";
-    }
-
-    private Document processFile(Path file) throws IOException {
-        String content = Files.readString(file);
-        Document document = new Document(file, content);
+    
+    /**
+     * Creates overlapping chunks from the input text using HuggingFace tokenization.
+     *
+     * @param text The text to chunk
+     * @param startPosition The starting position in the original file
+     * @return List of text chunks
+     */
+    private List<TextChunk> createChunks(String text, int startPosition) {
+        List<TextChunk> chunks = new ArrayList<>();
         
-        // Create chunks
-        List<String> chunks = createChunks(content);
+        // First, split text into sentences for better chunking
+        String[] sentences = text.split("(?<=[.!?])\\s+");
+        StringBuilder currentChunk = new StringBuilder();
+        int currentPosition = startPosition;
         
-        // Process each chunk
-        for (int i = 0; i < chunks.size(); i++) {
-            String chunkText = chunks.get(i);
-            float[] embedding = embeddingService.generateEmbedding(chunkText);
+        for (String sentence : sentences) {
+            // Get token count for this sentence
+            long sentenceTokens = tokenizer.encode(sentence).getIds().length;
             
-            int startPos = i * (Config.CHUNK_SIZE - Config.CHUNK_OVERLAP);
-            int endPos = startPos + chunkText.length();
+            // If adding this sentence would exceed max tokens, create a new chunk
+            long currentTokens = tokenizer.encode(currentChunk.toString()).getIds().length;
+            if (currentTokens + sentenceTokens > MAX_TOKENS && currentChunk.length() > 0) {
+                // Create chunk from current buffer
+                String chunkText = currentChunk.toString().trim();
+                if (!chunkText.isEmpty()) {
+                    chunks.add(new TextChunk(
+                            chunkText,
+                            null,
+                            currentPosition,
+                            currentPosition + chunkText.length()
+                    ));
+                }
+                
+                // Start new chunk with overlap
+                int overlapStart = Math.max(0, currentChunk.length() - Config.CHUNK_OVERLAP);
+                String overlap = currentChunk.substring(overlapStart);
+                currentChunk.setLength(0);
+                currentChunk.append(overlap);
+                currentPosition += chunkText.length() - overlap.length();
+            }
             
-            TextChunk chunk = new TextChunk(chunkText, embedding, startPos, endPos);
-            document.addChunk(chunk);
+            // Add the sentence to current chunk
+            currentChunk.append(sentence).append(" ");
         }
         
-        return document;
-    }
-
-    private List<String> createChunks(String content) {
-        List<String> chunks = new ArrayList<>();
-        int length = content.length();
-        int chunkSize = Config.CHUNK_SIZE;
-        int overlap = Config.CHUNK_OVERLAP;
-        
-        for (int i = 0; i < length; i += chunkSize - overlap) {
-            int end = Math.min(i + chunkSize, length);
-            chunks.add(content.substring(i, end));
+        // Add final chunk if there's anything left
+        String finalChunk = currentChunk.toString().trim();
+        if (!finalChunk.isEmpty()) {
+            chunks.add(new TextChunk(
+                    finalChunk,
+                    null,
+                    currentPosition,
+                    currentPosition + finalChunk.length()
+            ));
         }
         
         return chunks;
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (tokenizer != null) {
+            tokenizer.close();
+        }
     }
 } 

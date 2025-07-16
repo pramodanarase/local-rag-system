@@ -1,92 +1,67 @@
 package com.rag;
 
 import com.rag.config.Config;
-import com.rag.model.Document;
 import com.rag.model.TextChunk;
-import com.rag.service.DocumentProcessor;
 import com.rag.service.EmbeddingService;
-import com.rag.service.LMStudioClient;
+import com.rag.vectordb.LuceneVectorStore;
+import com.rag.vectordb.SearchResult;
+
+import ai.djl.translate.TranslateException;
+
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.NIOFSDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.stream.Collectors;
 
-public class QueryRepository {
+public class QueryRepository implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(QueryRepository.class);
-
-    public static void main(String[] args) {
-        if (args.length == 0) {
-            System.out.println("Usage: java -cp target/local-rag-system-1.0-SNAPSHOT-jar-with-dependencies.jar com.rag.QueryRepository \"Your question about the codebase?\"");
-            System.exit(1);
-        }
-
-        String question = String.join(" ", args);
-        logger.info("Processing question: {}", question);
-
-        try (
-            EmbeddingService embeddingService = new EmbeddingService();
-            LMStudioClient lmStudioClient = new LMStudioClient()
-        ) {
-            // Get query embedding
-            float[] queryEmbedding = embeddingService.generateEmbedding(question);
-
-            // Process repository to get documents
-            DocumentProcessor documentProcessor = new DocumentProcessor(embeddingService);
-            List<Document> documents = documentProcessor.processRepository(Config.REPO_PATH);
-
-            // Find most relevant chunks
-            List<RelevantChunk> relevantChunks = new ArrayList<>();
-            for (Document doc : documents) {
-                for (TextChunk chunk : doc.getChunks()) {
-                    float similarity = cosineSimilarity(queryEmbedding, chunk.getEmbedding());
-                    relevantChunks.add(new RelevantChunk(doc, chunk, similarity));
-                }
-            }
-
-            // Sort by similarity and take top K
-            List<String> contextChunks = relevantChunks.stream()
-                .sorted(Comparator.comparing(RelevantChunk::similarity).reversed())
-                .limit(Config.TOP_K)
-                .map(rc -> formatChunk(rc.document(), rc.chunk()))
-                .collect(Collectors.toList());
-
-            // Get answer from LM Studio
-            String answer = lmStudioClient.complete(question, contextChunks);
-
-            // Print results
-            System.out.println("\nQuestion: " + question);
-            System.out.println("\nAnswer: " + answer);
-
-        } catch (Exception e) {
-            logger.error("Error processing query", e);
-            System.exit(1);
-        }
+    
+    private final LuceneVectorStore vectorStore;
+    private final EmbeddingService embeddingService;
+    
+    public QueryRepository(EmbeddingService embeddingService) throws IOException {
+        this(embeddingService, new LuceneVectorStore(new NIOFSDirectory(Config.INDEX_PATH)));
     }
 
-    private static String formatChunk(Document doc, TextChunk chunk) {
-        return String.format("File: %s\n%s", doc.getPath(), chunk.getText());
+    public QueryRepository(EmbeddingService embeddingService, LuceneVectorStore vectorStore) {
+        this.embeddingService = embeddingService;
+        this.vectorStore = vectorStore;
+        
+        logger.info("Initialized QueryRepository with index at: {}", Config.INDEX_PATH);
     }
-
-    private static float cosineSimilarity(float[] v1, float[] v2) {
-        if (v1.length != v2.length) {
-            throw new IllegalArgumentException("Vectors must have same length");
+    
+    public List<TextChunk> query(String text, int k) throws IOException {
+        // Get embedding for query text
+        float[] queryEmbedding;
+        try {
+            queryEmbedding = embeddingService.generateEmbeddings(text);
+        } catch (TranslateException e) {
+            throw new IOException("Failed to generate embeddings", e);
         }
-
-        float dotProduct = 0;
-        float norm1 = 0;
-        float norm2 = 0;
-
-        for (int i = 0; i < v1.length; i++) {
-            dotProduct += v1[i] * v2[i];
-            norm1 += v1[i] * v1[i];
-            norm2 += v2[i] * v2[i];
+        
+        // Search for similar chunks
+        List<SearchResult> results = vectorStore.findSimilar(queryEmbedding, k);
+        
+        // Convert search results to text chunks
+        List<TextChunk> chunks = new ArrayList<>();
+        for (SearchResult result : results) {
+            chunks.add(new TextChunk(
+                result.content(),
+                null, // We don't need embedding in results
+                0,   // Position info not needed for results
+                result.content().length()
+            ));
         }
-
-        return (float) (dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2)));
+        
+        return chunks;
     }
-
-    private record RelevantChunk(Document document, TextChunk chunk, float similarity) {}
+    
+    @Override
+    public void close() throws IOException {
+        vectorStore.close();
+    }
 } 
