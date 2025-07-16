@@ -1,7 +1,7 @@
 package com.rag;
 
 import com.rag.config.Config;
-import com.rag.service.DocumentProcessor;
+import com.rag.service.TokenizationProcess;
 import com.rag.service.EmbeddingService;
 import com.rag.vectordb.LuceneVectorStore;
 import org.apache.lucene.store.Directory;
@@ -44,10 +44,10 @@ public class IndexFiles {
             logger.info("Opened index directory at: {}", indexPath);
             
             try (EmbeddingService embeddingService = new EmbeddingService();
-                 DocumentProcessor documentProcessor = new DocumentProcessor();
+                 TokenizationProcess tokenizationProcess = new TokenizationProcess();
                  LuceneVectorStore vectorStore = new LuceneVectorStore(directory)) {
                 
-                IndexRepository indexRepository = new IndexRepository(documentProcessor, embeddingService, vectorStore);
+                IndexRepository indexRepository = new IndexRepository(tokenizationProcess, embeddingService, vectorStore);
 
                 // Walk through directory and index files
                 try (Stream<Path> paths = Files.walk(sourcePath)) {

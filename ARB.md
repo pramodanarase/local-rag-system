@@ -47,7 +47,7 @@ graph TD
 ```mermaid
 classDiagram
     class IndexRepository {
-        -DocumentProcessor processor
+        -TokenizationProcess processor
         -EmbeddingService embedder
         -LuceneVectorStore store
         +indexFile(Path)
@@ -78,7 +78,7 @@ classDiagram
         +close()
     }
     
-    IndexRepository --> DocumentProcessor
+    IndexRepository --> TokenizationProcess
     IndexRepository --> EmbeddingService
     IndexRepository --> LuceneVectorStore
     QueryRepository --> EmbeddingService
@@ -87,7 +87,7 @@ classDiagram
 
 ### Component Descriptions
 
-1. **Document Processor**
+1. **Tokenization Process**
    - Handles file reading and chunking
    - Implements size limits and overlap
    - Filters files based on extensions

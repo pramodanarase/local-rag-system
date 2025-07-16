@@ -3,7 +3,7 @@ package com.rag;
 import com.rag.config.Config;
 import com.rag.model.Document;
 import com.rag.model.TextChunk;
-import com.rag.service.DocumentProcessor;
+import com.rag.service.TokenizationProcess;
 import com.rag.service.EmbeddingService;
 import com.rag.vectordb.LuceneVectorStore;
 
@@ -22,15 +22,15 @@ public class IndexRepository implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(IndexRepository.class);
     
     private final LuceneVectorStore vectorStore;
-    private final DocumentProcessor documentProcessor;
+    private final TokenizationProcess tokenizationProcess;
     private final EmbeddingService embeddingService;
     
-    public IndexRepository(DocumentProcessor documentProcessor, EmbeddingService embeddingService) throws IOException {
-        this(documentProcessor, embeddingService, new LuceneVectorStore(new NIOFSDirectory(Config.INDEX_PATH)));
+    public IndexRepository(TokenizationProcess tokenizationProcess, EmbeddingService embeddingService) throws IOException {
+        this(tokenizationProcess, embeddingService, new LuceneVectorStore(new NIOFSDirectory(Config.INDEX_PATH)));
     }
 
-    public IndexRepository(DocumentProcessor documentProcessor, EmbeddingService embeddingService, LuceneVectorStore vectorStore) {
-        this.documentProcessor = documentProcessor;
+    public IndexRepository(TokenizationProcess tokenizationProcess, EmbeddingService embeddingService, LuceneVectorStore vectorStore) {
+        this.tokenizationProcess = tokenizationProcess;
         this.embeddingService = embeddingService;
         this.vectorStore = vectorStore;
         
@@ -73,7 +73,7 @@ public class IndexRepository implements AutoCloseable {
         logger.info("Indexing file: {}", file);
         
         // Process the document into chunks
-        Document doc = documentProcessor.processFile(file);
+        Document doc = tokenizationProcess.processFile(file);
         
         // Index each chunk
         for (TextChunk chunk : doc.getChunks()) {

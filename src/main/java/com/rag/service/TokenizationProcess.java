@@ -17,15 +17,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class DocumentProcessor implements Closeable {
-    private static final Logger logger = LoggerFactory.getLogger(DocumentProcessor.class);
+public class TokenizationProcess implements Closeable {
+    private static final Logger logger = LoggerFactory.getLogger(TokenizationProcess.class);
     private static final int MAX_FILE_SIZE = 100 * 1024; // 100KB
     private static final int MAX_BUFFER_SIZE = 4 * 1024; // 4KB
     private static final int MAX_TOKENS = 512; // Maximum tokens per chunk for all-MiniLM-L6-v2
 
     private final HuggingFaceTokenizer tokenizer;
 
-    public DocumentProcessor() throws IOException {
+    public TokenizationProcess() throws IOException {
         // Initialize the tokenizer with options
         Map<String, String> options = Map.of(
                 "truncation", "true",
