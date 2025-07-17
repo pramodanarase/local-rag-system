@@ -12,7 +12,6 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.PriorityQueue;
 
 /**
  * Vector store implementation using Apache Lucene.
@@ -93,9 +92,9 @@ public class LuceneVectorStore implements Closeable {
         
         Document doc = new Document();
         
-        // Store the vector
-        doc.add(new StoredField(VECTOR_FIELD, VectorUtil.encode(vectorCopy)));
-        
+        // Store the vector using KnnFloatVectorField
+        doc.add(new KnnFloatVectorField(VECTOR_FIELD, vectorCopy, VectorSimilarityFunction.COSINE));
+    
         // Store metadata
         doc.add(new StringField(ID_FIELD, id, Field.Store.YES));
         doc.add(new TextField(CONTENT_FIELD, content, Field.Store.YES));
@@ -123,7 +122,7 @@ public class LuceneVectorStore implements Closeable {
     }
 
     /**
-     * Finds similar vectors using cosine similarity.
+     * Finds similar vectors using KNN vector search with cosine similarity.
      *
      * @param queryVector The query vector
      * @param k Number of results to return
@@ -146,59 +145,28 @@ public class LuceneVectorStore implements Closeable {
             queryVectorCopy = normalize(queryVectorCopy, queryMagnitude);
             logger.debug("Normalized query vector: {}", vectorToString(queryVectorCopy));
 
-            // Search all documents
-            TopDocs topDocs = searcher.search(new MatchAllDocsQuery(), Integer.MAX_VALUE);
+            // Create KNN vector query
+            Query knnQuery = new KnnFloatVectorQuery(VECTOR_FIELD, queryVectorCopy, k);
+            TopDocs topDocs = searcher.search(knnQuery, k);
             
-            // Calculate similarities and keep top k
-            PriorityQueue<SearchResult> results = new PriorityQueue<>(k, 
-                (a, b) -> Float.compare(a.score(), b.score())); // Changed to keep highest scores
-
+            List<SearchResult> results = new ArrayList<>();
             for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
                 Document doc = searcher.storedFields().document(scoreDoc.doc);
-                String docId = doc.get(ID_FIELD);
-                
-                byte[] encodedVector = doc.getBinaryValue(VECTOR_FIELD).bytes;
-                float[] docVector = VectorUtil.decode(encodedVector);
-                logger.debug("Document vector {}: {}", docId, vectorToString(docVector));
-                
-                // Calculate cosine similarity (dot product of normalized vectors)
-                float similarity = dotProduct(queryVectorCopy, docVector);
-                logger.debug("Similarity between query and {}: {}", docId, similarity);
-                
-                // Ensure similarity is in [-1, 1] range
-                similarity = Math.max(-1.0f, Math.min(1.0f, similarity));
-                
-                // Add a small bias to exact matches
-                if (similarity > 0.9999f) {
-                    similarity = 1.0f;
-                }
-                
-                if (results.size() < k || similarity > results.peek().score()) {
-                    if (results.size() == k) {
-                        results.poll(); // Remove lowest score
-                    }
-                    results.offer(new SearchResult(
-                        docId,
-                        doc.get(CONTENT_FIELD),
-                        doc.get(SOURCE_FIELD),
-                        similarity
-                    ));
-                }
-            }
-
-            // Convert to sorted list
-            ArrayList<SearchResult> sortedResults = new ArrayList<>(results.size());
-            while (!results.isEmpty()) {
-                sortedResults.add(0, results.poll());
+                results.add(new SearchResult(
+                    doc.get(ID_FIELD),
+                    doc.get(CONTENT_FIELD),
+                    doc.get(SOURCE_FIELD),
+                    scoreDoc.score
+                ));
             }
             
             // Log final results
             logger.debug("Final results:");
-            for (SearchResult result : sortedResults) {
+            for (SearchResult result : results) {
                 logger.debug("  {} (score: {})", result.id(), result.score());
             }
             
-            return sortedResults;
+            return results;
 
         } finally {
             searcherManager.release(searcher);
@@ -249,48 +217,13 @@ public class LuceneVectorStore implements Closeable {
         return normalized;
     }
     
-    private float dotProduct(float[] a, float[] b) {
-        float sum = 0;
-        for (int i = 0; i < a.length; i++) {
-            sum += a[i] * b[i];
-        }
-        return sum;
-    }
-    
     private String vectorToString(float[] vector) {
         StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < Math.min(3, vector.length); i++) {
+        for (int i = 0; i < vector.length; i++) {
             if (i > 0) sb.append(", ");
-            sb.append(String.format("%.3f", vector[i]));
+            sb.append(String.format("%.4f", vector[i]));
         }
-        if (vector.length > 3) sb.append(", ...");
         sb.append("]");
         return sb.toString();
-    }
-    
-    private static class VectorUtil {
-        static byte[] encode(float[] vector) {
-            byte[] bytes = new byte[vector.length * 4];
-            for (int i = 0; i < vector.length; i++) {
-                int bits = Float.floatToIntBits(vector[i]);
-                bytes[i*4] = (byte) (bits >> 24);
-                bytes[i*4 + 1] = (byte) (bits >> 16);
-                bytes[i*4 + 2] = (byte) (bits >> 8);
-                bytes[i*4 + 3] = (byte) bits;
-            }
-            return bytes;
-        }
-
-        static float[] decode(byte[] bytes) {
-            float[] vector = new float[bytes.length / 4];
-            for (int i = 0; i < vector.length; i++) {
-                int bits = ((bytes[i*4] & 0xFF) << 24) |
-                          ((bytes[i*4 + 1] & 0xFF) << 16) |
-                          ((bytes[i*4 + 2] & 0xFF) << 8) |
-                          (bytes[i*4 + 3] & 0xFF);
-                vector[i] = Float.intBitsToFloat(bits);
-            }
-            return vector;
-        }
     }
 } 
